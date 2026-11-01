@@ -117,7 +117,8 @@ async def cb_add_balance_custom_text(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(text, parse_mode="HTML", reply_markup=get_cancel_keyboard())
     await call.answer()
 
-@router.message(BalanceStates.waiting_for_add_amount)
+@router.message(BalanceStates.waiting_for_add_amount, ~F.text.startswith("/"))
+@router.message(F.reply_to_message & F.reply_to_message.text.contains("Введіть кількість уроків"), ~F.text.startswith("/"))
 async def process_add_balance(message: Message, state: FSMContext):
     val = message.text.strip().lstrip("+")
     if not val.isdigit() or int(val) <= 0:
@@ -194,7 +195,8 @@ async def cb_set_balance_custom_text(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(text, parse_mode="HTML", reply_markup=get_cancel_keyboard())
     await call.answer()
 
-@router.message(BalanceStates.waiting_for_set_amount)
+@router.message(BalanceStates.waiting_for_set_amount, ~F.text.startswith("/"))
+@router.message(F.reply_to_message & F.reply_to_message.text.contains("точну кількість"), ~F.text.startswith("/"))
 async def process_set_balance(message: Message, state: FSMContext):
     val = message.text.strip()
     if not val.isdigit() or int(val) < 0:

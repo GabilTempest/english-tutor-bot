@@ -247,7 +247,8 @@ async def prompt_reschedule_datetime(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(text, parse_mode="HTML", reply_markup=get_cancel_keyboard())
     await call.answer()
 
-@router.message(RescheduleStates.waiting_for_new_datetime)
+@router.message(RescheduleStates.waiting_for_new_datetime, ~F.text.startswith("/"))
+@router.message(F.reply_to_message & F.reply_to_message.text.contains("Перенесення уроку"), ~F.text.startswith("/"))
 async def process_reschedule_datetime(message: Message, state: FSMContext):
     data = await state.get_data()
     lesson_id = data.get("lesson_id")
