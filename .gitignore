@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.db
+tutor_bot.db
+test_tutor_bot.db
+bot.log
+bot_supervisor.log
+*.lnk
