@@ -168,6 +168,7 @@ async def cb_view_lesson(call: CallbackQuery):
 
 # ----------------- RESCHEDULE FLOW -----------------
 @router.message(Command("reschedule"))
+@router.message(Command("resched"))
 @router.callback_query(F.data == "reschedule_select")
 async def start_reschedule_selection(event: Message | CallbackQuery, state: FSMContext):
     await state.clear()
@@ -187,6 +188,49 @@ async def start_reschedule_selection(event: Message | CallbackQuery, state: FSMC
             await event.answer(msg, reply_markup=get_main_menu_keyboard(group.get("meeting_link", "")))
         return
 
+    # Direct instant rescheduling via command: e.g. /reschedule 04.11 19:00 or /reschedule 1 04.11 19:00
+    if isinstance(event, Message) and event.text:
+        parts = event.text.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip():
+            raw_arg = parts[1].strip()
+            target_lesson = upcoming[0]
+            tz_str = group.get("timezone", DEFAULT_TIMEZONE)
+
+            arg_parts = raw_arg.split(maxsplit=1)
+            first_clean = arg_parts[0].lstrip("#")
+            date_to_parse = raw_arg
+            if first_clean.isdigit():
+                spec_id = int(first_clean)
+                found = next((l for l in upcoming if l["id"] == spec_id), None)
+                if found and len(arg_parts) > 1:
+                    target_lesson = found
+                    date_to_parse = arg_parts[1].strip()
+
+            parsed_dt = parse_user_datetime(date_to_parse, tz_str)
+            if parsed_dt:
+                new_utc_str = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
+                user_name = event.from_user.full_name
+                if event.from_user.username:
+                    user_name += f" (@{event.from_user.username})"
+                new_lesson_id = await reschedule_lesson(target_lesson["id"], new_utc_str, user_name)
+                old_time_str = format_datetime_for_display(target_lesson["datetime_utc"], tz_str, group.get("student_timezone", ""))
+                new_time_str = format_datetime_for_display(new_utc_str, tz_str, group.get("student_timezone", ""))
+                success_text = (
+                    f"🔄 <b>УРОК УСПІШНО ПЕРЕНЕСЕНО!</b>\n\n"
+                    f"👤 <b>Ініціатор:</b> {user_name}\n"
+                    f"⏳ <b>Було:</b> {old_time_str}\n"
+                    f"✨ <b>Новий час:</b> {new_time_str}\n\n"
+                    f"📌 <i>Домашнє завдання автоматично перенесено на новий урок #{new_lesson_id}.</i>"
+                )
+                await event.answer(success_text, parse_mode="HTML", reply_markup=get_main_menu_keyboard(group.get("meeting_link", "")))
+                return
+            else:
+                await event.answer(
+                    "⚠️ Не вдалося розпізнати дату та час. Приклад: <code>/reschedule 04.11 19:00</code> або <code>/reschedule завтра 18:30</code>",
+                    parse_mode="HTML"
+                )
+                return
+
     # If only 1 upcoming lesson, immediately proceed to reschedule it
     if len(upcoming) == 1:
         lesson = upcoming[0]
@@ -194,11 +238,12 @@ async def start_reschedule_selection(event: Message | CallbackQuery, state: FSMC
         await state.set_state(RescheduleStates.waiting_for_new_datetime)
         prompt_text = (
             f"🔄 <b>Перенесення уроку #{lesson['id']}</b>\n"
-            f"Поточний час: {format_datetime_for_display(lesson['datetime_utc'], group.get('timezone', DEFAULT_TIMEZONE))}\n\n"
-            f"Введіть <b>нову дату та час</b> для уроку.\n"
-            f"Формат:\n"
-            f"• <code>ДД.ММ ГГ:ХХ</code> (наприклад: <code>06.11 19:00</code>)\n"
-            f"• або <code>завтра 18:30</code> / <code>сьогодні 20:00</code>"
+            f"🗓 <b>Поточний час:</b> {format_datetime_for_display(lesson['datetime_utc'], group.get('timezone', DEFAULT_TIMEZONE))}\n\n"
+            f"✍️ Надішліть <b>нову дату та час</b>:\n\n"
+            f"💡 <b>Як надіслати в групі:</b>\n"
+            f"1️⃣ Надішліть як <b>відповідь (Reply / Відповісти)</b> на це повідомлення бота: <code>04.11 19:00</code>\n"
+            f"2️⃣ Або прямою командою: <code>/reschedule 04.11 19:00</code>\n"
+            f"<i>(Якщо бот є Адміністратором групи, можна надіслати і звичайним повідомленням)</i>"
         )
         if isinstance(event, CallbackQuery):
             await event.message.edit_text(prompt_text, parse_mode="HTML", reply_markup=get_cancel_keyboard())
@@ -238,9 +283,13 @@ async def prompt_reschedule_datetime(call: CallbackQuery, state: FSMContext):
     text = (
         f"🔄 <b>Перенесення уроку #{lesson_id}</b>\n"
         f"🗓 <b>Поточний час:</b> {dt_str}\n\n"
-        f"✍️ Надішліть <b>нову дату та час</b> повідомленням.\n\n"
+        f"✍️ Надішліть <b>нову дату та час</b>:\n\n"
+        f"💡 <b>Як надіслати в групі:</b>\n"
+        f"1️⃣ Надішліть як <b>відповідь (Reply / Відповісти)</b> на це повідомлення бота: <code>04.11 19:00</code>\n"
+        f"2️⃣ Або прямою командою: <code>/reschedule 04.11 19:00</code>\n"
+        f"<i>(Якщо бот є Адміністратором групи, можна надіслати і звичайним повідомленням)</i>\n\n"
         f"<i>Приклади запису:</i>\n"
-        f"• <code>06.11 18:00</code>\n"
+        f"• <code>04.11 19:00</code>\n"
         f"• <code>завтра 17:30</code>\n"
         f"• <code>10.11.2026 19:00</code>"
     )
@@ -250,14 +299,34 @@ async def prompt_reschedule_datetime(call: CallbackQuery, state: FSMContext):
 @router.message(RescheduleStates.waiting_for_new_datetime, ~F.text.startswith("/"))
 @router.message(F.reply_to_message & F.reply_to_message.text.contains("Перенесення уроку"), ~F.text.startswith("/"))
 async def process_reschedule_datetime(message: Message, state: FSMContext):
+    import re
     data = await state.get_data()
     lesson_id = data.get("lesson_id")
-    lesson = await get_lesson_by_id(lesson_id)
+    lesson = None
+    if lesson_id:
+        lesson = await get_lesson_by_id(lesson_id)
+
+    # Fallback if state was lost (e.g. after container restart or timeout)
+    if not lesson and message.reply_to_message and message.reply_to_message.text:
+        m = re.search(r"Перенесення уроку #(\d+)", message.reply_to_message.text)
+        if m:
+            lesson = await get_lesson_by_id(int(m.group(1)))
+
+    if not lesson:
+        chat_id = message.chat.id
+        user_id = message.from_user.id if message.from_user else None
+        target_id = await get_target_chat_id(chat_id, user_id)
+        upcoming = await get_upcoming_lessons(target_id, limit=1)
+        if upcoming:
+            lesson = upcoming[0]
+            lesson_id = lesson["id"]
+
     if not lesson:
         await message.answer("❌ Помилка: урок не знайдено.")
         await state.clear()
         return
 
+    lesson_id = lesson["id"]
     group = await get_or_create_group(lesson["chat_id"])
     tz_str = group.get("timezone", DEFAULT_TIMEZONE)
     parsed_dt = parse_user_datetime(message.text, tz_str)
@@ -265,7 +334,7 @@ async def process_reschedule_datetime(message: Message, state: FSMContext):
     if not parsed_dt:
         await message.answer(
             "⚠️ Не вдалося розпізнати дату та час. Спробуйте ще раз у форматі:\n"
-            "<code>ДД.ММ ГГ:ХХ</code> (наприклад: <code>05.11 18:30</code> або <code>завтра 16:00</code>):",
+            "<code>ДД.ММ ГГ:ХХ</code> (наприклад: <code>04.11 19:00</code> або <code>завтра 16:00</code>):",
             parse_mode="HTML",
             reply_markup=get_cancel_keyboard()
         )
