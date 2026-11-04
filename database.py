@@ -310,6 +310,21 @@ async def get_upcoming_lessons(chat_id: int, limit: int = 5) -> List[Dict[str, A
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
+async def get_history_lessons(chat_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+    """Returns past, completed, rescheduled, or cancelled lessons."""
+    now_utc_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM lessons 
+               WHERE chat_id = ? AND (status IN ('completed', 'rescheduled', 'cancelled') OR datetime_utc < ?)
+               ORDER BY datetime_utc DESC 
+               LIMIT ?""",
+            (chat_id, now_utc_str, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
 async def get_pending_reminders(window_start_utc: str, window_end_utc: str) -> List[Dict[str, Any]]:
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row

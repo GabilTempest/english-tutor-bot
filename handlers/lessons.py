@@ -12,6 +12,7 @@ from database import (
     cancel_lesson,
     add_lesson,
     get_upcoming_lessons,
+    get_history_lessons,
     clear_past_lessons,
     clear_all_lessons,
     update_lesson_status,
@@ -44,60 +45,86 @@ ITEMS_PER_PAGE = 5
 @router.message(Command("lessons"))
 async def cmd_lessons(message: Message, state: FSMContext):
     await state.clear()
-    await show_lessons_page(message.chat.id, 0, message)
+    await show_lessons_page(message.chat.id, 0, message, tab="upcoming")
 
 @router.callback_query(F.data.startswith("list_lessons_"))
 async def cb_list_lessons(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    page = int(call.data.split("_")[-1])
-    await show_lessons_page(call.message.chat.id, page, call)
+    parts = call.data.split("_")
+    tab = "upcoming"
+    page = 0
+    if len(parts) >= 4:
+        tab = parts[2]
+        try:
+            page = int(parts[3])
+        except ValueError:
+            page = 0
+    elif len(parts) == 3:
+        if parts[2].isdigit():
+            page = int(parts[2])
+        else:
+            tab = parts[2]
+            page = 0
+    await show_lessons_page(call.message.chat.id, page, call, tab=tab)
     await call.answer()
 
-async def show_lessons_page(chat_id: int, page: int, event: Message | CallbackQuery):
+async def show_lessons_page(chat_id: int, page: int, event: Message | CallbackQuery, tab: str = "upcoming"):
     user_id = event.from_user.id if hasattr(event, "from_user") and event.from_user else None
     target_id = await get_target_chat_id(chat_id, user_id)
     group = await get_or_create_group(target_id)
-    all_lessons = await get_all_lessons(target_id, limit=50)
     paid_balance = await get_paid_balance(target_id)
 
-    # Determine which upcoming scheduled lessons are covered by the prepaid balance
-    upcoming_scheduled = await get_upcoming_lessons(target_id, limit=50)
-    paid_lesson_ids = {l["id"] for l in upcoming_scheduled[:paid_balance]}
+    upcoming_lessons = await get_upcoming_lessons(target_id, limit=50)
+    history_lessons = await get_history_lessons(target_id, limit=50)
+
+    paid_lesson_ids = {l["id"] for l in upcoming_lessons[:paid_balance]}
 
     group_name = group.get("chat_title") or ""
     sync_tag = f" <i>(Група: <b>{group_name}</b>)</i>" if (chat_id > 0 and group_name) else ""
+    tz_str = group.get("timezone", DEFAULT_TIMEZONE)
 
-    if not all_lessons:
-        text = (
-            f"📚 <b>Список уроків порожній.</b>{sync_tag}\n\n"
-            f"💰 <b>Оплачених занять:</b> {paid_balance} ур.\n\n"
-            f"Ви можете додати разовий урок кнопкою нижче або налаштувати щотижневі дні у Налаштуваннях."
-        )
-        kb = get_lessons_list_keyboard([], 0, 1, group.get("timezone", DEFAULT_TIMEZONE), paid_lesson_ids)
-        if isinstance(event, CallbackQuery):
-            await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-        else:
-            await event.answer(text, parse_mode="HTML", reply_markup=kb)
-        return
-
-    total_pages = max(1, (len(all_lessons) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+    lessons_to_show = upcoming_lessons if tab == "upcoming" else history_lessons
+    total_items = len(lessons_to_show)
+    total_pages = max(1, (total_items + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
     page = max(0, min(page, total_pages - 1))
     start_idx = page * ITEMS_PER_PAGE
     end_idx = start_idx + ITEMS_PER_PAGE
-    current_page_lessons = all_lessons[start_idx:end_idx]
+    current_page_lessons = lessons_to_show[start_idx:end_idx]
 
-    tz_str = group.get("timezone", DEFAULT_TIMEZONE)
-    text = (
-        f"📚 <b>СПИСОК ТА ІСТОРІЯ УРОКІВ (Сторінка {page + 1}/{total_pages})</b>{sync_tag}\n\n"
-        f"💰 <b>Залишок оплачених занять:</b> <b>{paid_balance}</b> ур.\n\n"
-        f"🟢 (Оплачено 💳) — входить у передоплату\n"
-        f"🟢 (Не оплачено ⏳) — очікує оплати\n"
-        f"✅ (Відбувся) — проведений урок\n"
-        f"🔄 (Перенесено) / ❌ (Скасовано) — оплата не стягується\n\n"
-        f"<i>Натисніть на урок нижче для перегляду деталей або дій:</i>"
+    if tab == "upcoming":
+        header_title = f"🗓 <b>ЗАПЛАНОВАНІ УРОКИ (Стор. {page + 1}/{total_pages})</b>{sync_tag}"
+        legend = (
+            f"💰 <b>Залишок оплачених занять:</b> <b>{paid_balance}</b> ур.\n\n"
+            f"🟢 <b>(Оплачено 💳)</b> — входить у передоплату\n"
+            f"⏳ <b>(Не оплачено)</b> — очікує оплати\n\n"
+        )
+        empty_note = "<i>ℹ️ Наразі немає запланованих майбутніх уроків.</i>"
+    else:
+        header_title = f"📚 <b>ІСТОРІЯ ПРОВЕДЕНИХ ТА МИНУЛИХ УРОКІВ (Стор. {page + 1}/{total_pages})</b>{sync_tag}"
+        legend = (
+            f"✅ <b>(Відбувся)</b> — проведений урок\n"
+            f"🔄 <b>(Перенесено)</b> / ❌ <b>(Скасовано)</b> — плата не стягується\n\n"
+        )
+        empty_note = "<i>ℹ️ Історія проведених занять поки що порожня.</i>"
+
+    if not current_page_lessons:
+        content_text = f"{empty_note}\n\n<i>Оберіть потрібну вкладку вище:</i>"
+    else:
+        content_text = f"{legend}<i>Натисніть на урок нижче для перегляду деталей або дій:</i>"
+
+    text = f"{header_title}\n\n{content_text}"
+
+    kb = get_lessons_list_keyboard(
+        lessons=current_page_lessons,
+        page=page,
+        total_pages=total_pages,
+        tz_str=tz_str,
+        paid_lesson_ids=paid_lesson_ids,
+        tab=tab,
+        upcoming_count=len(upcoming_lessons),
+        history_count=len(history_lessons)
     )
 
-    kb = get_lessons_list_keyboard(current_page_lessons, page, total_pages, tz_str, paid_lesson_ids)
     if isinstance(event, CallbackQuery):
         await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
@@ -107,12 +134,28 @@ async def show_lessons_page(chat_id: int, page: int, event: Message | CallbackQu
 async def cb_view_lesson(call: CallbackQuery):
     parts = call.data.split("_")
     lesson_id = int(parts[2])
-    page = int(parts[3]) if len(parts) > 3 else 0
+    tab = "upcoming"
+    page = 0
+    if len(parts) >= 5:
+        tab = parts[3]
+        try:
+            page = int(parts[4])
+        except ValueError:
+            page = 0
+    elif len(parts) == 4:
+        if parts[3].isdigit():
+            page = int(parts[3])
+        else:
+            tab = parts[3]
 
     lesson = await get_lesson_by_id(lesson_id)
     if not lesson:
         await call.answer("❌ Урок не знайдено!", show_alert=True)
         return
+
+    # If lesson is not scheduled, its natural tab is history
+    if lesson.get("status") != "scheduled" and len(parts) < 5:
+        tab = "history"
 
     group = await get_or_create_group(lesson["chat_id"])
     tz_primary = group.get("timezone", DEFAULT_TIMEZONE)
@@ -162,7 +205,7 @@ async def cb_view_lesson(call: CallbackQuery):
         f"📝 <b>Домашнє завдання:</b>\n{hw_text}\n"
     )
 
-    kb = get_lesson_detail_keyboard(lesson, page=page)
+    kb = get_lesson_detail_keyboard(lesson, page=page, tab=tab)
     await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await call.answer()
 

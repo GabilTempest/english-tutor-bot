@@ -27,46 +27,57 @@ def get_lessons_list_keyboard(
     page: int = 0, 
     total_pages: int = 1, 
     tz_str: str = DEFAULT_TIMEZONE,
-    paid_lesson_ids: set = None
+    paid_lesson_ids: set = None,
+    tab: str = "upcoming",
+    upcoming_count: int = 0,
+    history_count: int = 0
 ) -> InlineKeyboardMarkup:
     buttons = []
     if paid_lesson_ids is None:
         paid_lesson_ids = set()
-    
-    status_icons = {
-        "scheduled": "🟢",
-        "completed": "✅",
-        "rescheduled": "🔄",
-        "cancelled": "❌"
-    }
-    
+
+    # 1. Group / Tabs row
+    tab_upcoming_label = f"• 🗓 Заплановані ({upcoming_count}) •" if tab == "upcoming" else f"🗓 Заплановані ({upcoming_count})"
+    tab_history_label = f"• 📚 Історія ({history_count}) •" if tab == "history" else f"📚 Історія ({history_count})"
+    buttons.append([
+        InlineKeyboardButton(text=tab_upcoming_label, callback_data="list_lessons_upcoming_0"),
+        InlineKeyboardButton(text=tab_history_label, callback_data="list_lessons_history_0")
+    ])
+
     for l in lessons:
-        icon = status_icons.get(l.get("status"), "▫️")
-        dt_str = format_short_date(l["datetime_utc"], tz_str)
         status = l.get("status")
+        dt_str = format_short_date(l["datetime_utc"], tz_str)
 
         if status == "scheduled":
             if l["id"] in paid_lesson_ids:
+                icon = "🟢"
                 status_part = "Оплачено 💳"
             else:
-                status_part = "Не оплачено ⏳"
+                icon = "⏳"
+                status_part = "Не оплачено"
+        elif status == "completed":
+            icon = "✅"
+            status_part = "Відбувся"
+        elif status == "rescheduled":
+            icon = "🔄"
+            status_part = "Перенесено"
+        elif status == "cancelled":
+            icon = "❌"
+            status_part = "Скасовано"
         else:
-            status_part = {
-                "completed": "Відбувся",
-                "rescheduled": "Перенесено",
-                "cancelled": "Скасовано"
-            }.get(status, "")
-        
+            icon = "▫️"
+            status_part = status
+
         has_hw = " 📝" if l.get("homework") else ""
         btn_text = f"{icon} {dt_str} ({status_part}){has_hw}"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_lesson_{l['id']}_{page}")])
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_lesson_{l['id']}_{tab}_{page}")])
 
     # Pagination row
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"list_lessons_{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"list_lessons_{tab}_{page - 1}"))
     if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"list_lessons_{page + 1}"))
+        nav_row.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"list_lessons_{tab}_{page + 1}"))
     if nav_row:
         buttons.append(nav_row)
 
@@ -84,10 +95,10 @@ def get_clear_options_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧹 Видалити минулі / перенесені / скасовані", callback_data="do_clear_past")],
         [InlineKeyboardButton(text="💥 Очистити абсолютно ВСІ уроки", callback_data="do_clear_all")],
-        [InlineKeyboardButton(text="🔙 Скасувати", callback_data="list_lessons_0")]
+        [InlineKeyboardButton(text="🔙 Скасувати", callback_data="list_lessons_upcoming_0")]
     ])
 
-def get_lesson_detail_keyboard(lesson: Dict[str, Any], page: int = 0) -> InlineKeyboardMarkup:
+def get_lesson_detail_keyboard(lesson: Dict[str, Any], page: int = 0, tab: str = "upcoming") -> InlineKeyboardMarkup:
     lesson_id = lesson["id"]
     status = lesson.get("status")
     buttons = []
@@ -113,7 +124,7 @@ def get_lesson_detail_keyboard(lesson: Dict[str, Any], page: int = 0) -> InlineK
     ])
 
     buttons.append([
-        InlineKeyboardButton(text="🔙 До списку уроків", callback_data=f"list_lessons_{page}"),
+        InlineKeyboardButton(text="🔙 До списку уроків", callback_data=f"list_lessons_{tab}_{page}"),
         InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
