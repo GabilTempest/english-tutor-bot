@@ -20,15 +20,28 @@ if env_file.exists():
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 from aiohttp import web, ClientSession
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, BaseMiddleware
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, TelegramObject
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN
-from database import init_db
+from database import init_db, record_chat_member
 from scheduler import check_reminders_job, check_post_lesson_job, check_unpaid_reminders_job, maintenance_job
 from handlers import routers
+
+class TrackMembersMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = getattr(event, "from_user", None)
+        chat = getattr(event, "chat", None)
+        if not chat and hasattr(event, "message") and event.message:
+            chat = event.message.chat
+        if user and chat and chat.id < 0 and not getattr(user, "is_bot", False):
+            try:
+                await record_chat_member(chat.id, user.id, user.username or "", user.first_name or "")
+            except Exception:
+                pass
+        return await handler(event, data)
 
 # Logging configuration
 logging.basicConfig(
@@ -88,6 +101,8 @@ async def main():
     # 2. Setup Bot and Dispatcher
     bot = Bot(token=token)
     dp = Dispatcher(storage=MemoryStorage())
+    dp.message.outer_middleware(TrackMembersMiddleware())
+    dp.callback_query.outer_middleware(TrackMembersMiddleware())
 
     # 3. Register handlers
     for router in routers:

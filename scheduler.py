@@ -15,7 +15,8 @@ from database import (
     generate_recurring_lessons_for_group,
     get_pending_unpaid_reminders,
     mark_unpaid_reminder_sent,
-    get_paid_lesson_ids_for_group
+    get_paid_lesson_ids_for_group,
+    get_chat_members
 )
 from utils.time_utils import format_datetime_for_display
 
@@ -38,24 +39,63 @@ async def check_reminders_job(bot: Bot):
             tz_student = lesson.get("student_timezone", "")
             time_display = format_datetime_for_display(lesson["datetime_utc"], tz_primary, tz_student)
             
+            # Homework section (only if homework is present)
             hw_text = lesson.get("homework", "").strip()
-            if not hw_text:
-                hw_section = "▫️ <i>Домашнє завдання не було записане</i>"
-            else:
-                hw_section = f"<b>📝 Домашнє завдання на сьогодні:</b>\n{hw_text}"
+            hw_section = f"📝 <b>Домашнє завдання:</b>\n{hw_text}\n\n" if hw_text else ""
 
-            link_section = f"🔗 <b>Посилання на урок:</b> {meeting_link}" if meeting_link else "⚠️ <i>Посилання на дзвінок не вказано!</i>"
+            # Meeting link section (only if link is present)
+            has_valid_link = bool(meeting_link and (meeting_link.startswith("http://") or meeting_link.startswith("https://")))
+            link_section = f"🔗 <b>Посилання на дзвінок:</b> {meeting_link}\n\n" if has_valid_link else ""
+
+            # Tag chat members so everyone receives an alert/notification
+            tag_list = []
+            seen_uids = set()
+
+            # 1. From database recorded members
+            try:
+                members = await get_chat_members(chat_id)
+                for m in members:
+                    uid = m["user_id"]
+                    if uid not in seen_uids:
+                        seen_uids.add(uid)
+                        if m.get("username"):
+                            tag_list.append(f"@{m['username']}")
+                        elif m.get("first_name"):
+                            tag_list.append(f'<a href="tg://user?id={uid}">{m["first_name"]}</a>')
+            except Exception as e:
+                logger.debug(f"Could not load chat members from DB for {chat_id}: {e}")
+
+            # 2. In groups, fetch administrators / owner via Telegram API
+            if chat_id < 0:
+                try:
+                    admins = await bot.get_chat_administrators(chat_id)
+                    for a in admins:
+                        if a.user.is_bot:
+                            continue
+                        uid = a.user.id
+                        if uid not in seen_uids:
+                            seen_uids.add(uid)
+                            if a.user.username:
+                                tag_list.append(f"@{a.user.username}")
+                            elif a.user.first_name:
+                                tag_list.append(f'<a href="tg://user?id={uid}">{a.user.first_name}</a>')
+                except Exception as e:
+                    logger.debug(f"Could not fetch chat administrators for {chat_id}: {e}")
+
+            tags_section = f"👥 {' '.join(tag_list)}\n\n" if tag_list else ""
 
             text = (
-                f"🔔 <b>НАГАДУВАННЯ: Урок розпочнеться через {REMINDER_MINUTES_BEFORE} хвилин!</b>\n\n"
-                f"🕒 <b>Час:</b> {time_display}\n"
-                f"{link_section}\n\n"
-                f"{hw_section}\n\n"
+                f"🔔 <b>НАГАДУВАННЯ ПРО УРОК!</b>\n\n"
+                f"🕒 Урок розпочнеться через <b>{REMINDER_MINUTES_BEFORE} хвилин</b>!\n"
+                f"🗓 <b>Час:</b> {time_display}\n\n"
+                f"{link_section}"
+                f"{hw_section}"
+                f"{tags_section}"
                 f"<i>Гарного та продуктивного уроку! 🇬🇧</i>"
             )
 
             reply_markup = None
-            if meeting_link and (meeting_link.startswith("http://") or meeting_link.startswith("https://")):
+            if has_valid_link:
                 reply_markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🚀 Приєднатися до уроку", url=meeting_link)]
                 ])

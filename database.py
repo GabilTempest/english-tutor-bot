@@ -78,6 +78,43 @@ async def init_db():
         """)
         await db.commit()
 
+        # Migration: create chat_members table for tracking participants to tag in reminders
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS chat_members (
+                chat_id INTEGER,
+                user_id INTEGER,
+                username TEXT DEFAULT '',
+                first_name TEXT DEFAULT '',
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, user_id)
+            );
+        """)
+        await db.commit()
+
+async def record_chat_member(chat_id: int, user_id: int, username: str = "", first_name: str = ""):
+    """Records or updates a chat participant for tagging."""
+    if not chat_id or not user_id:
+        return
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO chat_members (chat_id, user_id, username, first_name, last_seen)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(chat_id, user_id) DO UPDATE SET 
+                   username=excluded.username,
+                   first_name=excluded.first_name,
+                   last_seen=CURRENT_TIMESTAMP""",
+            (chat_id, user_id, username or "", first_name or "")
+        )
+        await db.commit()
+
+async def get_chat_members(chat_id: int) -> List[Dict[str, Any]]:
+    """Returns all tracked participants of a chat."""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM chat_members WHERE chat_id = ? ORDER BY last_seen DESC", (chat_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
 async def track_user_group(user_id: int, group_id: int):
     """Associates a user with a group they interact in."""
     if not user_id or group_id >= 0:
