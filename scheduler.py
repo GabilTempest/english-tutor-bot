@@ -82,17 +82,20 @@ async def check_reminders_job(bot: Bot):
                 except Exception as e:
                     logger.debug(f"Could not fetch chat administrators for {chat_id}: {e}")
 
-            tags_section = f"👥 {' '.join(tag_list)}\n\n" if tag_list else ""
+            tags_section = f"👥 {' '.join(tag_list)}" if tag_list else ""
 
-            text = (
-                f"🔔 <b>НАГАДУВАННЯ ПРО УРОК!</b>\n\n"
-                f"🕒 Урок розпочнеться через <b>{REMINDER_MINUTES_BEFORE} хвилин</b>!\n"
-                f"🗓 <b>Час:</b> {time_display}\n\n"
-                f"{link_section}"
-                f"{hw_section}"
-                f"{tags_section}"
-                f"<i>Гарного та продуктивного уроку! 🇬🇧</i>"
-            )
+            body_lines = [
+                f"🔔 <b>НАГАДУВАННЯ ПРО УРОК!</b>\n",
+                f"🕒 Урок розпочнеться через <b>{REMINDER_MINUTES_BEFORE} хвилин</b>!\n🗓 <b>Час:</b> {time_display}"
+            ]
+            if link_section.strip():
+                body_lines.append(link_section.strip())
+            if hw_section.strip():
+                body_lines.append(hw_section.strip())
+            if tags_section.strip():
+                body_lines.append(tags_section.strip())
+
+            text = "\n\n".join(body_lines)
 
             reply_markup = None
             if has_valid_link:
