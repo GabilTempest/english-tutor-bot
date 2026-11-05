@@ -91,6 +91,12 @@ async def init_db():
         """)
         await db.commit()
 
+    # Automatically clean up any existing duplicate scheduled lessons on startup
+    try:
+        await deduplicate_scheduled_lessons()
+    except Exception:
+        pass
+
 async def record_chat_member(chat_id: int, user_id: int, username: str = "", first_name: str = ""):
     """Records or updates a chat participant for tagging."""
     if not chat_id or not user_id:
@@ -246,6 +252,63 @@ async def update_lesson_homework(lesson_id: int, homework: str):
         await db.execute("UPDATE lessons SET homework = ? WHERE id = ?", (homework, lesson_id))
         await db.commit()
 
+async def deduplicate_scheduled_lessons(chat_id: int = None):
+    """
+    Finds and merges duplicate scheduled lessons for the same chat on the same day.
+    Keeps only one scheduled lesson per day, merging homework if needed.
+    """
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        if chat_id:
+            chat_ids = [chat_id]
+        else:
+            async with db.execute("SELECT DISTINCT chat_id FROM groups") as c:
+                chat_ids = [r[0] for r in await c.fetchall()]
+
+        for cid in chat_ids:
+            async with db.execute("SELECT timezone FROM groups WHERE chat_id = ?", (cid,)) as c:
+                grow = await c.fetchone()
+                tz_str = grow["timezone"] if grow and grow["timezone"] else config.DEFAULT_TIMEZONE
+            try:
+                tz = ZoneInfo(tz_str)
+            except Exception:
+                tz = ZoneInfo(config.DEFAULT_TIMEZONE)
+
+            async with db.execute(
+                "SELECT * FROM lessons WHERE chat_id = ? AND status = 'scheduled' ORDER BY datetime_utc ASC, id ASC",
+                (cid,)
+            ) as c:
+                scheduled_lessons = await c.fetchall()
+
+            seen_dates = {}
+            duplicates_to_delete = []
+
+            for l in scheduled_lessons:
+                dt_str = l["datetime_utc"]
+                try:
+                    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+                    date_key = dt.date()
+                except Exception:
+                    date_key = dt_str[:10]
+
+                if date_key in seen_dates:
+                    primary_lesson = seen_dates[date_key]
+                    # Merge homework if primary is empty but duplicate has homework
+                    if not primary_lesson["homework"] and l["homework"]:
+                        await db.execute("UPDATE lessons SET homework = ? WHERE id = ?", (l["homework"], primary_lesson["id"]))
+                    # Update any references to point to primary lesson
+                    await db.execute("UPDATE lessons SET rescheduled_to_id = ? WHERE rescheduled_to_id = ?", (primary_lesson["id"], l["id"]))
+                    await db.execute("UPDATE lessons SET rescheduled_from_id = ? WHERE rescheduled_from_id = ?", (primary_lesson["id"], l["id"]))
+                    duplicates_to_delete.append(l["id"])
+                else:
+                    seen_dates[date_key] = l
+
+            if duplicates_to_delete:
+                placeholders = ",".join("?" * len(duplicates_to_delete))
+                await db.execute(f"DELETE FROM lessons WHERE id IN ({placeholders})", duplicates_to_delete)
+                await db.commit()
+
 async def reschedule_lesson(lesson_id: int, new_datetime_utc: str, rescheduled_by: str) -> int:
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -255,21 +318,70 @@ async def reschedule_lesson(lesson_id: int, new_datetime_utc: str, rescheduled_b
             if not old_lesson:
                 raise ValueError("Lesson not found")
 
-        # Create new lesson with inherited homework
-        cursor = await db.execute(
-            """INSERT INTO lessons (chat_id, datetime_utc, status, rescheduled_from_id, rescheduled_by, homework)
-               VALUES (?, ?, 'scheduled', ?, ?, ?)""",
-            (old_lesson["chat_id"], new_datetime_utc, lesson_id, rescheduled_by, old_lesson["homework"])
-        )
-        new_lesson_id = cursor.lastrowid
+        chat_id = old_lesson["chat_id"]
+
+        # Get group timezone
+        async with db.execute("SELECT timezone FROM groups WHERE chat_id = ?", (chat_id,)) as cursor:
+            group_row = await cursor.fetchone()
+            tz_str = group_row["timezone"] if group_row and group_row["timezone"] else config.DEFAULT_TIMEZONE
+
+        try:
+            tz = ZoneInfo(tz_str)
+        except Exception:
+            tz = ZoneInfo(config.DEFAULT_TIMEZONE)
+
+        # Parse target local date
+        new_utc_dt = datetime.strptime(new_datetime_utc, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+        target_local_date = new_utc_dt.astimezone(tz).date()
+
+        # Check if another scheduled lesson already exists on that date
+        async with db.execute(
+            "SELECT * FROM lessons WHERE chat_id = ? AND status = 'scheduled' AND id != ? ORDER BY id ASC",
+            (chat_id, lesson_id)
+        ) as cursor:
+            other_scheduled = await cursor.fetchall()
+
+        existing_on_same_day = None
+        for cand in other_scheduled:
+            try:
+                c_utc = datetime.strptime(cand["datetime_utc"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+                c_date = c_utc.astimezone(tz).date()
+            except Exception:
+                c_date = cand["datetime_utc"][:10]
+
+            if c_date == target_local_date:
+                existing_on_same_day = cand
+                break
+
+        if existing_on_same_day:
+            target_lesson_id = existing_on_same_day["id"]
+            merged_hw = existing_on_same_day["homework"] or old_lesson["homework"] or ""
+            # Update existing lesson with new datetime and merged homework
+            await db.execute(
+                """UPDATE lessons 
+                   SET datetime_utc = ?, homework = ?, rescheduled_from_id = ?, rescheduled_by = ?
+                   WHERE id = ?""",
+                (new_datetime_utc, merged_hw, lesson_id, rescheduled_by, target_lesson_id)
+            )
+        else:
+            # Create new lesson row
+            cursor = await db.execute(
+                """INSERT INTO lessons (chat_id, datetime_utc, status, rescheduled_from_id, rescheduled_by, homework)
+                   VALUES (?, ?, 'scheduled', ?, ?, ?)""",
+                (chat_id, new_datetime_utc, lesson_id, rescheduled_by, old_lesson["homework"])
+            )
+            target_lesson_id = cursor.lastrowid
 
         # Update old lesson status
         await db.execute(
             "UPDATE lessons SET status = 'rescheduled', rescheduled_to_id = ?, rescheduled_by = ? WHERE id = ?",
-            (new_lesson_id, rescheduled_by, lesson_id)
+            (target_lesson_id, rescheduled_by, lesson_id)
         )
         await db.commit()
-        return new_lesson_id
+
+    # Deduplicate in case any lingering duplicates exist
+    await deduplicate_scheduled_lessons(chat_id)
+    return target_lesson_id
 
 async def cancel_lesson(lesson_id: int, cancelled_by: str = ""):
     async with aiosqlite.connect(config.DB_PATH) as db:

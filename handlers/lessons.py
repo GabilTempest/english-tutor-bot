@@ -13,6 +13,7 @@ from database import (
     add_lesson,
     get_upcoming_lessons,
     get_history_lessons,
+    deduplicate_scheduled_lessons,
     clear_past_lessons,
     clear_all_lessons,
     update_lesson_status,
@@ -72,6 +73,7 @@ async def show_lessons_page(chat_id: int, page: int, event: Message | CallbackQu
     user_id = event.from_user.id if hasattr(event, "from_user") and event.from_user else None
     target_id = await get_target_chat_id(chat_id, user_id)
     group = await get_or_create_group(target_id)
+    await deduplicate_scheduled_lessons(target_id)
     paid_balance = await get_paid_balance(target_id)
 
     upcoming_lessons = await get_upcoming_lessons(target_id, limit=50)

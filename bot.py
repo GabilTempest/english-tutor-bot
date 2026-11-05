@@ -54,8 +54,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EnglishTutorBot")
 
+APP_VERSION = "2026-11-05-v3"
+
 async def health_check_handler(request):
-    return web.Response(text="English Tutor Bot is RUNNING 24/7!", status=200, content_type="text/plain")
+    return web.Response(text=f"English Tutor Bot is RUNNING 24/7! (Version {APP_VERSION})", status=200, content_type="text/plain")
 
 async def render_keepalive_job():
     url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
