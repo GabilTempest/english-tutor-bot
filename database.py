@@ -263,7 +263,7 @@ async def deduplicate_scheduled_lessons(chat_id: int = None):
         if chat_id:
             chat_ids = [chat_id]
         else:
-            async with db.execute("SELECT DISTINCT chat_id FROM groups") as c:
+            async with db.execute("SELECT DISTINCT chat_id FROM lessons WHERE status = 'scheduled'") as c:
                 chat_ids = [r[0] for r in await c.fetchall()]
 
         for cid in chat_ids:
