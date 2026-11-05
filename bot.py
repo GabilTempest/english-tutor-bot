@@ -54,7 +54,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EnglishTutorBot")
 
-APP_VERSION = "2026-11-05-v4"
+APP_VERSION = "2026-11-05-v5"
 
 async def health_check_handler(request):
     try:

@@ -104,42 +104,44 @@ async def init_db():
         pass
 
 async def seed_initial_data_if_needed():
-    """Restores initial default group, rules, history and lessons if database has no group lessons."""
+    """Restores initial default groups, rules, history and lessons if database has no group lessons."""
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        has_group = False
-        async with db.execute("SELECT COUNT(*) as cnt FROM groups WHERE chat_id < 0") as c:
-            row = await c.fetchone()
-            if row and row["cnt"] > 0:
-                has_group = True
+        target_ids = [-1004314568000, -5272955285]
+        for tid in target_ids:
+            await db.execute("""
+                INSERT OR IGNORE INTO groups (chat_id, chat_title, meeting_link, timezone, paid_lessons_balance)
+                VALUES (?, 'English', '', 'Europe/Kyiv', 1)
+            """, (tid,))
+            await db.execute("UPDATE groups SET chat_title = 'English', paid_lessons_balance = 1 WHERE chat_id = ?", (tid,))
+            await db.execute("INSERT OR IGNORE INTO recurring_rules (chat_id, day_of_week, time_str) VALUES (?, 0, '19:30')", (tid,))
+            await db.execute("INSERT OR IGNORE INTO recurring_rules (chat_id, day_of_week, time_str) VALUES (?, 3, '19:00')", (tid,))
 
-        if has_group:
-            async with db.execute("SELECT COUNT(*) as lcnt FROM lessons WHERE chat_id = -5272955285") as lc:
-                lrow = await lc.fetchone()
-                if lrow and lrow["lcnt"] > 0:
-                    return
+        await db.execute("INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (360167790, -1004314568000)")
 
-        # Seed group -5272955285
-        await db.execute("""
-            INSERT OR IGNORE INTO groups (chat_id, chat_title, meeting_link, timezone, paid_lessons_balance)
-            VALUES (-5272955285, 'English', '', 'Europe/Kyiv', 1)
-        """)
-        await db.execute("""
-            UPDATE groups SET chat_title = 'English', paid_lessons_balance = 1 WHERE chat_id = -5272955285
-        """)
-        await db.execute("INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (360167790, -5272955285)")
-        await db.execute("INSERT OR IGNORE INTO recurring_rules (chat_id, day_of_week, time_str) VALUES (-5272955285, 0, '19:30')")
-        await db.execute("INSERT OR IGNORE INTO recurring_rules (chat_id, day_of_week, time_str) VALUES (-5272955285, 3, '19:00')")
+        # Check if -1004314568000 already has lessons
+        async with db.execute("SELECT COUNT(*) as lcnt FROM lessons WHERE chat_id = -1004314568000") as lc:
+            lrow = await lc.fetchone()
+            if lrow and lrow["lcnt"] > 0:
+                return
+
+        # If -5272955285 has lessons, migrate them to -1004314568000
+        async with db.execute("SELECT COUNT(*) as lcnt FROM lessons WHERE chat_id = -5272955285") as lc:
+            old_row = await lc.fetchone()
+            if old_row and old_row["lcnt"] > 0:
+                await db.execute("UPDATE lessons SET chat_id = -1004314568000 WHERE chat_id = -5272955285")
+                await db.commit()
+                return
 
         default_lessons = [
-            (1, -5272955285, '2026-11-02 17:30:00', 'rescheduled', 2, None, 'Користувач', ''),
-            (2, -5272955285, '2026-11-04 16:00:00', 'completed', None, 1, 'Користувач', ''),
-            (3, -5272955285, '2026-11-05 17:00:00', 'rescheduled', 4, None, 'Користувач', ''),
-            (4, -5272955285, '2026-11-09 17:30:00', 'scheduled', None, 3, 'Користувач', ''),
-            (5, -5272955285, '2026-11-12 17:00:00', 'scheduled', None, None, '', ''),
-            (6, -5272955285, '2026-11-16 17:30:00', 'scheduled', None, None, '', ''),
-            (7, -5272955285, '2026-11-19 17:00:00', 'scheduled', None, None, '', ''),
-            (8, -5272955285, '2026-11-23 17:30:00', 'scheduled', None, None, '', ''),
+            (1, -1004314568000, '2026-11-02 17:30:00', 'rescheduled', 2, None, 'Користувач', ''),
+            (2, -1004314568000, '2026-11-04 16:00:00', 'completed', None, 1, 'Користувач', ''),
+            (3, -1004314568000, '2026-11-05 17:00:00', 'rescheduled', 4, None, 'Користувач', ''),
+            (4, -1004314568000, '2026-11-09 17:30:00', 'scheduled', None, 3, 'Користувач', ''),
+            (5, -1004314568000, '2026-11-12 17:00:00', 'scheduled', None, None, '', ''),
+            (6, -1004314568000, '2026-11-16 17:30:00', 'scheduled', None, None, '', ''),
+            (7, -1004314568000, '2026-11-19 17:00:00', 'scheduled', None, None, '', ''),
+            (8, -1004314568000, '2026-11-23 17:30:00', 'scheduled', None, None, '', ''),
         ]
         for l in default_lessons:
             await db.execute("""
@@ -215,7 +217,55 @@ async def get_target_chat_id(chat_id: int, user_id: int = None) -> int:
 
     return chat_id
 
+async def sync_or_migrate_group_data(active_chat_id: int):
+    """If active group has no lessons, transfers or clones lessons, rules and balance from any previous group."""
+    if active_chat_id >= 0:
+        return
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT COUNT(*) as cnt FROM lessons WHERE chat_id = ?", (active_chat_id,)) as c:
+            row = await c.fetchone()
+            lcnt = row["cnt"] if row else 0
+        if lcnt > 0:
+            return
+
+        # Check if there is a donor group with lessons
+        async with db.execute(
+            "SELECT chat_id, COUNT(*) as cnt FROM lessons WHERE chat_id != ? GROUP BY chat_id ORDER BY cnt DESC LIMIT 1",
+            (active_chat_id,)
+        ) as c:
+            donor = await c.fetchone()
+
+        if donor and donor["cnt"] > 0:
+            donor_id = donor["chat_id"]
+            await db.execute("UPDATE lessons SET chat_id = ? WHERE chat_id = ?", (active_chat_id, donor_id))
+            await db.execute("UPDATE recurring_rules SET chat_id = ? WHERE chat_id = ?", (active_chat_id, donor_id))
+            async with db.execute("SELECT * FROM groups WHERE chat_id = ?", (donor_id,)) as gc:
+                grow = await gc.fetchone()
+                if grow:
+                    await db.execute("""
+                        INSERT INTO groups (chat_id, chat_title, meeting_link, timezone, student_timezone, paid_lessons_balance)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(chat_id) DO UPDATE SET
+                            meeting_link=excluded.meeting_link,
+                            timezone=excluded.timezone,
+                            student_timezone=excluded.student_timezone,
+                            paid_lessons_balance=excluded.paid_lessons_balance
+                    """, (
+                        active_chat_id,
+                        grow["chat_title"] or "English",
+                        grow["meeting_link"],
+                        grow["timezone"],
+                        grow["student_timezone"],
+                        grow["paid_lessons_balance"]
+                    ))
+            await db.execute("UPDATE user_groups SET group_id = ? WHERE group_id = ?", (active_chat_id, donor_id))
+            await db.commit()
+
 async def get_or_create_group(chat_id: int, chat_title: str = "") -> Dict[str, Any]:
+    if chat_id < 0:
+        await sync_or_migrate_group_data(chat_id)
+
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM groups WHERE chat_id = ?", (chat_id,)) as cursor:
