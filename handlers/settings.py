@@ -21,6 +21,12 @@ from utils.time_utils import DAYS_UA
 from states import SettingsStates
 from config import DEFAULT_TIMEZONE
 
+from datetime import datetime
+import os
+from aiogram.types import FSInputFile
+import config
+from database import init_db
+
 router = Router()
 
 DAY_MAP = {
@@ -424,3 +430,49 @@ async def process_custom_timezone(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=get_main_menu_keyboard(group.get("meeting_link", ""))
     )
+
+@router.message(Command("backup"))
+async def cmd_backup(message: Message):
+    if not os.path.exists(config.DB_PATH):
+        await message.answer("❌ Файл бази даних ще не створено.")
+        return
+    now_str = datetime.now().strftime("%Y%m%d_%H%M")
+    filename = f"tutor_bot_backup_{now_str}.db"
+    doc = FSInputFile(config.DB_PATH, filename=filename)
+    await message.answer_document(
+        document=doc,
+        caption="💾 <b>Резервна копія бази даних</b>\n\nЗбережіть цей файл. У разі потреби ви зможете відновити стан, надіславши файл боту або у відповідь на /restore.",
+        parse_mode="HTML"
+    )
+
+@router.message(Command("restore"))
+@router.message(F.document & (F.caption.contains("restore") | F.caption.contains("відновити")))
+async def cmd_restore(message: Message):
+    doc = message.document
+    if not doc and message.reply_to_message and message.reply_to_message.document:
+        doc = message.reply_to_message.document
+
+    if not doc:
+        await message.answer(
+            "ℹ️ Щоб відновити базу даних, надішліть файл <code>.db</code> або дайте відповідь (Reply) на файл командою <code>/restore</code>.",
+            parse_mode="HTML"
+        )
+        return
+
+    file_name = doc.file_name or ""
+    if not (file_name.endswith(".db") or file_name.endswith(".sqlite")):
+        await message.answer("⚠️ Файл повинен мати розширення <code>.db</code> або <code>.sqlite</code>.", parse_mode="HTML")
+        return
+
+    try:
+        file = await message.bot.get_file(doc.file_id)
+        backup_path = str(config.DB_PATH) + ".bak"
+        if os.path.exists(config.DB_PATH):
+            import shutil
+            shutil.copy2(config.DB_PATH, backup_path)
+
+        await message.bot.download_file(file.file_path, destination=config.DB_PATH)
+        await init_db()
+        await message.answer("✅ <b>Базу даних успішно відновлено!</b>\nВсі уроки, розклад та історію завантажено.", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Помилка відновлення бази даних: {e}")

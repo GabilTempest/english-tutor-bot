@@ -91,11 +91,62 @@ async def init_db():
         """)
         await db.commit()
 
+    # Seed initial group data if database was re-created or empty
+    try:
+        await seed_initial_data_if_needed()
+    except Exception:
+        pass
+
     # Automatically clean up any existing duplicate scheduled lessons on startup
     try:
         await deduplicate_scheduled_lessons()
     except Exception:
         pass
+
+async def seed_initial_data_if_needed():
+    """Restores initial default group, rules, history and lessons if database has no group lessons."""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        has_group = False
+        async with db.execute("SELECT COUNT(*) as cnt FROM groups WHERE chat_id < 0") as c:
+            row = await c.fetchone()
+            if row and row["cnt"] > 0:
+                has_group = True
+
+        if has_group:
+            async with db.execute("SELECT COUNT(*) as lcnt FROM lessons WHERE chat_id = -5272955285") as lc:
+                lrow = await lc.fetchone()
+                if lrow and lrow["lcnt"] > 0:
+                    return
+
+        # Seed group -5272955285
+        await db.execute("""
+            INSERT OR IGNORE INTO groups (chat_id, chat_title, meeting_link, timezone, paid_lessons_balance)
+            VALUES (-5272955285, 'English', '', 'Europe/Kyiv', 1)
+        """)
+        await db.execute("""
+            UPDATE groups SET chat_title = 'English', paid_lessons_balance = 1 WHERE chat_id = -5272955285
+        """)
+        await db.execute("INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (360167790, -5272955285)")
+        await db.execute("INSERT OR IGNORE INTO recurring_rules (chat_id, day_of_week, time_str) VALUES (-5272955285, 0, '19:30')")
+        await db.execute("INSERT OR IGNORE INTO recurring_rules (chat_id, day_of_week, time_str) VALUES (-5272955285, 3, '19:00')")
+
+        default_lessons = [
+            (1, -5272955285, '2026-11-02 17:30:00', 'rescheduled', 2, None, 'Користувач', ''),
+            (2, -5272955285, '2026-11-04 16:00:00', 'completed', None, 1, 'Користувач', ''),
+            (3, -5272955285, '2026-11-05 17:00:00', 'rescheduled', 4, None, 'Користувач', ''),
+            (4, -5272955285, '2026-11-09 17:30:00', 'scheduled', None, 3, 'Користувач', ''),
+            (5, -5272955285, '2026-11-12 17:00:00', 'scheduled', None, None, '', ''),
+            (6, -5272955285, '2026-11-16 17:30:00', 'scheduled', None, None, '', ''),
+            (7, -5272955285, '2026-11-19 17:00:00', 'scheduled', None, None, '', ''),
+            (8, -5272955285, '2026-11-23 17:30:00', 'scheduled', None, None, '', ''),
+        ]
+        for l in default_lessons:
+            await db.execute("""
+                INSERT OR IGNORE INTO lessons (id, chat_id, datetime_utc, status, rescheduled_to_id, rescheduled_from_id, rescheduled_by, homework)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, l)
+        await db.commit()
 
 async def record_chat_member(chat_id: int, user_id: int, username: str = "", first_name: str = ""):
     """Records or updates a chat participant for tagging."""
@@ -620,16 +671,29 @@ async def generate_recurring_lessons_for_group(chat_id: int, days_ahead: int = 2
     start_date = now_local.date()
     end_date = start_date + timedelta(days=days_ahead)
 
-    # Collect existing lesson datetimes in UTC
+    # Collect existing lesson datetimes in UTC and scheduled dates
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT datetime_utc FROM lessons WHERE chat_id = ?", (chat_id,)) as cursor:
-            existing = {r["datetime_utc"] for r in await cursor.fetchall()}
+        async with db.execute("SELECT datetime_utc, status FROM lessons WHERE chat_id = ?", (chat_id,)) as cursor:
+            existing_rows = await cursor.fetchall()
+
+    existing = {r["datetime_utc"] for r in existing_rows}
+    scheduled_dates = set()
+    for r in existing_rows:
+        if r["status"] == "scheduled":
+            try:
+                dt_obj = datetime.strptime(r["datetime_utc"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC")).astimezone(group_tz)
+                scheduled_dates.add(dt_obj.date())
+            except Exception:
+                pass
 
     curr_date = start_date
     while curr_date <= end_date:
         for rule in rules:
             if curr_date.weekday() == rule["day_of_week"]:
+                # If this calendar date already has a scheduled lesson, do not add duplicate
+                if curr_date in scheduled_dates:
+                    continue
                 hour, minute = map(int, rule["time_str"].split(":"))
                 local_dt = datetime(curr_date.year, curr_date.month, curr_date.day, hour, minute, tzinfo=group_tz)
                 # If lesson is in the past, skip
@@ -640,6 +704,7 @@ async def generate_recurring_lessons_for_group(chat_id: int, days_ahead: int = 2
                 if utc_str not in existing:
                     await add_lesson(chat_id, utc_str)
                     existing.add(utc_str)
+                    scheduled_dates.add(curr_date)
         curr_date += timedelta(days=1)
 
 async def clear_past_lessons(chat_id: int) -> int:

@@ -54,10 +54,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EnglishTutorBot")
 
-APP_VERSION = "2026-11-05-v3"
+APP_VERSION = "2026-11-05-v4"
 
 async def health_check_handler(request):
-    return web.Response(text=f"English Tutor Bot is RUNNING 24/7! (Version {APP_VERSION})", status=200, content_type="text/plain")
+    try:
+        import aiosqlite
+        from config import DB_PATH
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            groups = [dict(r) for r in await (await db.execute("SELECT * FROM groups")).fetchall()]
+            lessons = [dict(r) for r in await (await db.execute("SELECT id, datetime_utc, status, chat_id FROM lessons")).fetchall()]
+            rules = [dict(r) for r in await (await db.execute("SELECT * FROM recurring_rules")).fetchall()]
+        return web.json_response({
+            "version": APP_VERSION,
+            "groups_count": len(groups),
+            "lessons_count": len(lessons),
+            "rules_count": len(rules),
+            "groups": groups,
+            "lessons": lessons,
+            "rules": rules
+        })
+    except Exception as e:
+        return web.Response(text=f"Error: {e}", status=500)
 
 async def render_keepalive_job():
     url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
@@ -80,7 +98,8 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="lessons", description="Список та історія уроків"),
         BotCommand(command="reschedule", description="Перенести урок"),
         BotCommand(command="link", description="Посилання на онлайн-урок"),
-        BotCommand(command="settings", description="Налаштування групи")
+        BotCommand(command="settings", description="Налаштування групи"),
+        BotCommand(command="backup", description="Резервна копія бази даних")
     ]
     await bot.set_my_commands(commands)
 
