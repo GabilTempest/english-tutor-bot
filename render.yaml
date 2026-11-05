@@ -4,6 +4,7 @@ services:
     runtime: docker
     plan: free
     region: frankfurt
+    autoDeploy: true
     envVars:
       - key: BOT_TOKEN
         sync: false
